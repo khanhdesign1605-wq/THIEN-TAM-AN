@@ -38,6 +38,18 @@ const api={
   async addMember(email,role){return ok(await sb.from("members").upsert({email:email.toLowerCase(),role}).select().single())},
   async removeMember(email){const d=ok(await sb.from("members").delete().eq("email",email).select());if(!d||!d.length)throw{message:"permission"}},
   async signIn(email){ok(await sb.auth.signInWithOtp({email,options:{emailRedirectTo:location.origin+location.pathname,shouldCreateUser:true}}))},
+  async signInPw(email,password){ok(await sb.auth.signInWithPassword({email,password}))},
+  async changePw(password){ok(await sb.auth.updateUser({password}))},
+  async createAccount(email,password){
+    const tmp=window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_KEY,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false,storageKey:"tta-tao-tk"}});
+    const r=await tmp.auth.signUp({email,password});
+    if(r.error)throw r.error;
+    const u=r.data&&r.data.user;
+    if(u&&Array.isArray(u.identities)&&u.identities.length===0)return "exists";
+    if(!r.data.session)return "confirm";
+    try{await tmp.auth.signOut()}catch(e){}
+    return "created";
+  },
   async signOut(){await sb.auth.signOut()}
 };
 
@@ -73,11 +85,12 @@ function setHash(h){try{history.replaceState(null,"",h?"#"+h:location.pathname+l
 function go(view,arg,force){
   if(!force&&S.view==="edit"&&S.dirty){showLeaveGuard(()=>go(view,arg,true));return}
   if((view==="edit"||view==="members")&&!canWrite()){view="login"}
+  if(view==="pw"&&!S.email)view="login";
   if(view==="members"&&!isAdmin())view="kho";
   S.view=view;S.confirm=null;
   if(view==="post"){S.open=arg;setHash("p-"+arg)}
   else if(view==="edit"){setupEditor(arg);setHash(arg&&arg.id?"sua-"+arg.id:"viet")}
-  else if(["kho","login","members"].includes(view))setHash({kho:"kho",login:"dang-nhap",members:"thanh-vien"}[view]);
+  else if(["kho","login","members","pw"].includes(view))setHash({kho:"kho",login:"dang-nhap",members:"thanh-vien",pw:"doi-mat-khau"}[view]);
   else setHash("");
   render();window.scrollTo({top:0});
 }
@@ -85,6 +98,7 @@ function render(){
   renderAccount();renderTabs();
   if(!sb){app.innerHTML=`<div class="status">Trang chưa được kết nối với kho dữ liệu.<br>Hãy điền SUPABASE_URL và SUPABASE_KEY trong tệp <b>config.js</b> (xem HUONG-DAN).</div>`;return}
   if(S.view==="login")return renderLogin();
+  if(S.view==="pw")return renderPw();
   if(!S.loaded){app.innerHTML=`<div class="status">Đang tải bài viết…</div>`;return}
   if(S.view==="post")renderPost();
   else if(S.view==="kho")renderKho();
@@ -101,7 +115,9 @@ function renderAccount(){
     <span class="who">${esc(S.email)} · <b>${canWrite()?ROLES[S.role]:"Chưa có quyền viết"}</b></span>
     ${canWrite()?`<button class="btn btn-gold btn-sm" id="aNew">+ Viết bài mới</button>`:""}
     ${isAdmin()?`<button class="btn btn-onwine btn-sm" id="aMem">Thành viên</button>`:""}
+    <button class="btn btn-onwine btn-sm" id="aPw">Đổi mật khẩu</button>
     <button class="btn btn-onwine btn-sm" id="aOut">Đăng xuất</button></div>`;
+  el.querySelector("#aPw").onclick=()=>go("pw");
   const n=el.querySelector("#aNew");if(n)n.onclick=()=>go("edit",null);
   const m=el.querySelector("#aMem");if(m)m.onclick=()=>go("members");
   el.querySelector("#aOut").onclick=async()=>{if(S.view==="edit"&&S.dirty)return showLeaveGuard(doSignOut);doSignOut()};
@@ -243,36 +259,84 @@ function renderKho(){
 /* ---------- Login ---------- */
 function renderLogin(){
   if(canWrite()){go("kho",null,true);return}
-  const m=S.loginMsg;
+  const m=S.loginMsg||{},mode=S.loginMode||"pw";
   app.innerHTML=`<div class="login">
     <h2>Dành cho người viết</h2>
-    ${S.email?`<p>Bạn đang đăng nhập bằng <b>${esc(S.email)}</b>, nhưng email này chưa có trong danh sách người viết. Hãy nhờ quản trị nhóm thêm email của bạn, rồi tải lại trang.</p>`
-    :`<p>Nhập email đã được quản trị thêm vào nhóm. Chúng tôi sẽ gửi một đường link đăng nhập vào hộp thư của bạn, không cần mật khẩu.</p>
-    <form id="lf" class="login-form"><label class="field">Email<input id="lEmail" type="email" required autocomplete="email" placeholder="ban@gmail.com" value="${esc(m&&m.email||"")}"></label>
+    ${S.email?`<p>Bạn đang đăng nhập bằng <b>${esc(S.email)}</b>, nhưng tài khoản này chưa có quyền viết bài. Hãy nhờ quản trị thêm email của bạn ở trang Thành viên, rồi tải lại trang.</p><button class="btn btn-ghost" id="lOut">Đăng xuất</button>`
+    :mode==="pw"?`<p>Đăng nhập bằng tài khoản quản trị đã tạo cho bạn.</p>
+    <form id="lf" class="login-form">
+      <label class="field">Email<input id="lEmail" type="email" required autocomplete="username" placeholder="ban@gmail.com" value="${esc(m.email||"")}"></label>
+      <label class="field">Mật khẩu<input id="lPw" type="password" required autocomplete="current-password"></label>
+      <button class="btn btn-gold" id="lBtn" type="submit">Đăng nhập</button></form>
+    <p class="${m.err?"err":"ok"}" id="lMsg">${m.text?esc(m.text):""}</p>
+    <p class="hint">Quên mật khẩu? Nhờ quản trị đặt lại, hoặc <a href="#" id="lMagic">đăng nhập bằng link gửi qua email</a>.</p>`
+    :`<p>Nhập email của bạn, chúng tôi gửi một đường link đăng nhập vào hộp thư.</p>
+    <form id="lf" class="login-form"><label class="field">Email<input id="lEmail" type="email" required autocomplete="email" value="${esc(m.email||"")}"></label>
       <button class="btn btn-gold" id="lBtn" type="submit">Gửi link đăng nhập</button></form>
-    <p class="${m&&m.err?"err":"ok"}" id="lMsg">${m?esc(m.text):""}</p>
-    <p class="hint">Người đọc không cần đăng nhập. Mọi bài đã đăng đều xem được tự do.</p>`}
+    <p class="${m.err?"err":"ok"}" id="lMsg">${m.text?esc(m.text):""}</p>
+    <p class="hint"><a href="#" id="lPwMode">← Đăng nhập bằng mật khẩu</a></p>`}
+    <p class="hint">Người đọc không cần đăng nhập. Mọi bài đã đăng đều xem được tự do.</p>
     <button class="back" id="lBack">← Về trang chủ</button></div>`;
   document.getElementById("lBack").onclick=()=>go("list");
-  const f=document.getElementById("lf");
-  if(f)f.onsubmit=async e=>{e.preventDefault();const email=document.getElementById("lEmail").value.trim();const b=document.getElementById("lBtn");b.disabled=true;b.textContent="Đang gửi…";
-    try{await api.signIn(email);S.loginMsg={email,text:`Đã gửi link đăng nhập tới ${email}. Hãy mở email (kể cả mục Spam) và bấm vào link trên chính thiết bị này.`}}
-    catch(x){S.loginMsg={email,err:true,text:/rate|security purposes/i.test(x.message||"")?"Bạn vừa yêu cầu quá nhiều lần. Hãy đợi vài phút rồi thử lại.":"Không gửi được link: "+(x.message||"")}}
+  const o=document.getElementById("lOut");if(o)o.onclick=()=>doSignOut();
+  const mg=document.getElementById("lMagic");if(mg)mg.onclick=e=>{e.preventDefault();S.loginMode="link";S.loginMsg={email:document.getElementById("lEmail").value};renderLogin()};
+  const pm=document.getElementById("lPwMode");if(pm)pm.onclick=e=>{e.preventDefault();S.loginMode="pw";S.loginMsg=null;renderLogin()};
+  const f=document.getElementById("lf");if(!f)return;
+  f.onsubmit=async e=>{e.preventDefault();const email=document.getElementById("lEmail").value.trim();const b=document.getElementById("lBtn");b.disabled=true;
+    if(mode==="pw"){b.textContent="Đang đăng nhập…";
+      try{await api.signInPw(email,document.getElementById("lPw").value);S.loginMsg=null;return}
+      catch(x){S.loginMsg={email,err:true,text:/invalid login|credentials/i.test(x.message||"")?"Email hoặc mật khẩu không đúng.":/confirm/i.test(x.message||"")?"Tài khoản chưa được xác nhận. Hãy nhờ quản trị kiểm tra.":"Không đăng nhập được: "+(x.message||"")}}
+    }else{b.textContent="Đang gửi…";
+      try{await api.signIn(email);S.loginMsg={email,text:`Đã gửi link tới ${email}. Hãy mở email (kể cả mục Spam) và bấm link trên chính thiết bị này.`}}
+      catch(x){S.loginMsg={email,err:true,text:/rate|security purposes/i.test(x.message||"")?"Bạn vừa yêu cầu quá nhiều lần. Hãy đợi vài phút rồi thử lại.":"Không gửi được link: "+(x.message||"")}}
+    }
     renderLogin()};
+}
+function renderPw(){
+  app.innerHTML=`<div class="login"><h2>Đổi mật khẩu</h2><p>Tài khoản: <b>${esc(S.email)}</b></p>
+    <form id="pf" class="login-form">
+      <label class="field">Mật khẩu mới (ít nhất 6 ký tự)<input id="p1" type="password" minlength="6" required autocomplete="new-password"></label>
+      <label class="field">Nhập lại mật khẩu mới<input id="p2" type="password" minlength="6" required autocomplete="new-password"></label>
+      <button class="btn btn-gold" id="pBtn" type="submit">Lưu mật khẩu mới</button></form>
+    <p id="pMsg"></p><button class="back" id="pBack">← Quay lại</button></div>`;
+  document.getElementById("pBack").onclick=()=>go(canWrite()?"kho":"list");
+  document.getElementById("pf").onsubmit=async e=>{e.preventDefault();const a=document.getElementById("p1").value,b=document.getElementById("p2").value,m=document.getElementById("pMsg");
+    if(a!==b){m.className="err";m.textContent="Hai mật khẩu chưa khớp nhau.";return}
+    try{await api.changePw(a);m.className="ok";m.textContent="Đã đổi mật khẩu. Lần sau hãy đăng nhập bằng mật khẩu mới.";e.target.reset()}
+    catch(x){m.className="err";m.textContent=/different|same/i.test(x.message||"")?"Mật khẩu mới phải khác mật khẩu cũ.":/weak|at least/i.test(x.message||"")?"Mật khẩu quá ngắn hoặc quá đơn giản.":"Chưa đổi được: "+(x.message||"")}};
 }
 
 /* ---------- Members (admin) ---------- */
 async function renderMembers(){
   app.innerHTML=`<div class="members"><div class="kho-head"><div><h2>Thành viên</h2><p>Người đọc không cần tài khoản. Chỉ những email dưới đây mới đăng nhập để viết bài được.</p></div></div>
     <div class="w-panel" style="margin-bottom:22px"><h5>Thêm người cùng viết</h5>
-      <form id="mf" class="mem-form"><label class="field" style="flex:2 1 220px">Email<input id="mEmail" type="email" required placeholder="thanhvien@gmail.com"></label>
+      <form id="mf" class="mem-form"><label class="field" style="flex:2 1 220px">Email<input id="mEmail" type="email" required placeholder="thanhvien@gmail.com" autocomplete="off"></label>
+      <label class="field" style="flex:1 1 180px">Mật khẩu ban đầu<span style="display:flex;gap:6px"><input id="mPw" type="text" minlength="6" autocomplete="off" placeholder="ít nhất 6 ký tự"><button type="button" class="btn btn-ghost btn-sm" id="mGen">Tạo</button></span></label>
       <label class="field" style="flex:1 1 150px">Vai trò<select id="mRole"><option value="writer">Người viết</option><option value="admin">Quản trị</option></select></label>
-      <button class="btn btn-gold" type="submit" style="align-self:flex-end">Thêm</button></form>
+      <button class="btn btn-gold" id="mBtn" type="submit" style="align-self:flex-end">Tạo tài khoản</button></form>
+      <p class="hint">Để trống mật khẩu nếu người đó đã có tài khoản, chỉ cần cấp quyền.</p>
+      <div id="mDone"></div>
       <p class="hint"><b>Người viết</b>: viết bài, lưu nháp, đăng và sửa bài; chỉ xoá được bài của mình. <b>Quản trị</b>: làm được mọi việc, kể cả thêm/bớt thành viên.</p>
       <span class="err" id="mErr"></span></div>
     <ul class="rows" id="mList"><li class="empty">Đang tải…</li></ul></div>`;
-  document.getElementById("mf").onsubmit=async e=>{e.preventDefault();const em=document.getElementById("mEmail").value.trim(),r=document.getElementById("mRole").value;
-    try{await api.addMember(em,r);renderMembers()}catch(x){document.getElementById("mErr").textContent=errText(x)}};
+  document.getElementById("mGen").onclick=()=>{const c="abcdefghjkmnpqrstuvwxyz23456789";let p="";const r=crypto.getRandomValues(new Uint32Array(10));r.forEach(n=>p+=c[n%c.length]);document.getElementById("mPw").value=p};
+  document.getElementById("mf").onsubmit=async e=>{e.preventDefault();
+    const em=document.getElementById("mEmail").value.trim().toLowerCase(),pw=document.getElementById("mPw").value,r=document.getElementById("mRole").value,err=document.getElementById("mErr"),done=document.getElementById("mDone"),btn=document.getElementById("mBtn");
+    err.textContent="";done.innerHTML="";
+    if(pw&&pw.length<6){err.textContent="Mật khẩu cần ít nhất 6 ký tự.";return}
+    btn.disabled=true;btn.textContent="Đang tạo…";
+    let note="";
+    try{
+      if(pw){const res=await api.createAccount(em,pw);
+        if(res==="exists")note=`Email này đã có tài khoản từ trước nên mật khẩu không đổi. Người đó đăng nhập bằng mật khẩu cũ (hoặc link qua email).`;
+        else if(res==="confirm")note=`Tài khoản đã tạo nhưng Supabase đang bắt xác nhận email. Hãy tắt "Confirm email" (xem hướng dẫn), hoặc vào Supabase > Authentication > Users để xác nhận thủ công.`;}
+      await api.addMember(em,r);
+      S.members=await api.members();drawMembers();e.target.reset();
+      const msg=pw&&!note?`Trang web: ${location.origin+location.pathname}\nEmail: ${em}\nMật khẩu: ${pw}\n(Vào mục "Dành cho người viết" ở cuối trang để đăng nhập, rồi bấm "Đổi mật khẩu".)`:"";
+      done.innerHTML=`<div class="banner" style="flex-direction:column;align-items:flex-start">${pw&&!note?`<b>Đã tạo tài khoản ${esc(ROLES[r])} cho ${esc(em)}.</b> Gửi thông tin sau cho họ:<pre class="cred">${esc(msg)}</pre><button type="button" class="btn btn-wine btn-sm" id="mCopy">Sao chép</button>`:`<b>Đã cấp quyền ${esc(ROLES[r])} cho ${esc(em)}.</b>${note?`<span>${esc(note)}</span>`:""}`}</div>`;
+      const cp=document.getElementById("mCopy");if(cp)cp.onclick=async()=>{try{await navigator.clipboard.writeText(msg);cp.textContent="Đã sao chép"}catch(x){}};
+    }catch(x){err.textContent=/signups? not allowed|disabled/i.test(x.message||"")?"Supabase đang tắt đăng ký tài khoản mới. Hãy bật lại (xem hướng dẫn).":/password/i.test(x.message||"")?"Mật khẩu chưa đạt yêu cầu: "+x.message:errText(x)}
+    btn.disabled=false;btn.textContent="Tạo tài khoản"};
   try{S.members=await api.members()}catch(x){document.getElementById("mList").innerHTML=`<li class="err">${esc(errText(x))}</li>`;return}
   drawMembers();
 }
@@ -439,7 +503,7 @@ async function boot(){
   S.loaded=true;
   let init=["list"];
   if(authHash)init=canWrite()?["kho"]:["login"];
-  else if(h==="kho")init=["kho"];else if(h==="dang-nhap")init=["login"];else if(h==="thanh-vien")init=["members"];
+  else if(h==="kho")init=["kho"];else if(h==="dang-nhap")init=["login"];else if(h==="thanh-vien")init=["members"];else if(h==="doi-mat-khau")init=["pw"];
   else if(h==="viet")init=["edit",null];else if(h.startsWith("sua-"))init=["edit",{id:h.slice(4)}];else if(h.startsWith("p-"))init=["post",h.slice(2)];
   go(init[0],init[1],true);
   sb.auth.onAuthStateChange((ev,session)=>{
