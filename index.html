@@ -229,6 +229,19 @@ footer .motto{font-family:var(--script);font-size:1.7rem;color:var(--lotus)}
 .share{display:flex;gap:10px;align-items:center;margin-top:28px;flex-wrap:wrap}
 footer a{color:var(--muted)}
 footer .wlink{margin-left:auto}
+.pager{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:center;margin:40px 0 0}
+.pg{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;min-width:40px;height:40px;padding:0 14px;cursor:pointer;font-size:.9rem;font-variant-numeric:tabular-nums}
+.pg:hover:not([disabled]):not([aria-current]){border-color:var(--gold)}
+.pg[aria-current="page"]{background:var(--wine);border-color:var(--wine);color:#F6DFA4;font-weight:600;cursor:default}
+.pg[disabled]{opacity:.4;cursor:default}
+.pg-gap{color:var(--muted);padding:0 4px}
+.pg-total{width:100%;text-align:center;color:var(--muted);font-size:.8rem;margin-top:4px}
+.pg-info{color:var(--muted);font-size:.85rem;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cover.loading{background:linear-gradient(100deg,var(--chip) 30%,var(--bg) 50%,var(--chip) 70%);background-size:200% 100%;animation:shimmer 1.2s linear infinite}
+@keyframes shimmer{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){.cover.loading{animation:none}}
+@media (max-width:520px){.pg:not(.num){padding:0 10px}.pager .pg.num:not([aria-current]){min-width:36px;padding:0 8px}}
+
 .cred{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.85rem;max-width:100%}
 .login a{color:var(--wine)}
 </style>
@@ -255,7 +268,7 @@ footer .wlink{margin-left:auto}
   </div>
 </footer>
 <script src="supabase.js"></script>
-<script src="config.js"></script>
-<script src="app.js"></script>
+<script src="config.js?v=3"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

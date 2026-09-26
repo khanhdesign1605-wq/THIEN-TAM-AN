@@ -5,8 +5,10 @@ const ROLES={writer:"Người viết",admin:"Quản trị"};
 const MONTHS=["Tháng 1","Tháng 2","Tháng 3","Tháng 4","Tháng 5","Tháng 6","Tháng 7","Tháng 8","Tháng 9","Tháng 10","Tháng 11","Tháng 12"];
 const LOTUS='<svg class="lotus" viewBox="0 0 100 70" aria-hidden="true"><g fill="none" stroke="#F6DFA4" stroke-width="1.6" stroke-linejoin="round"><path d="M50 6C40 22 40 44 50 60C60 44 60 22 50 6Z" fill="rgba(247,217,227,.35)"/><path d="M50 60C38 52 28 38 28 22C38 26 46 40 50 60Z" fill="rgba(247,217,227,.25)"/><path d="M50 60C62 52 72 38 72 22C62 26 54 40 50 60Z" fill="rgba(247,217,227,.25)"/><path d="M50 60C34 58 18 48 12 36C26 36 40 46 50 60Z"/><path d="M50 60C66 58 82 48 88 36C74 36 60 46 50 60Z"/><path d="M20 64Q50 70 80 64"/></g></svg>';
 const FIELDS=["title","cat","date","place","highlight","excerpt","body","cover"];
+const META="id,status,title,cat,date,place,highlight,excerpt,author_email,created_at,updated_at";
+const PER_PAGE=9;
 
-const S={posts:[],drafts:[],loaded:false,filter:"all",q:"",view:"list",open:null,
+const S={posts:[],drafts:[],loaded:false,filter:"all",q:"",page:1,full:{},covers:{},view:"list",open:null,
   email:null,role:null,members:[],ed:null,dirty:false,confirm:null,busy:false,loginMsg:null};
 const canWrite=()=>!!S.role, isAdmin=()=>S.role==="admin";
 const app=document.getElementById("app");
@@ -29,7 +31,9 @@ const configured=CFG.SUPABASE_URL&&CFG.SUPABASE_KEY&&!/DAN_/.test(CFG.SUPABASE_U
 const sb=configured&&window.supabase?window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_KEY,{auth:{flowType:"implicit",detectSessionInUrl:true,persistSession:true}}):null;
 const ok=r=>{if(r.error)throw r.error;return r.data};
 const api={
-  async posts(){return ok(await sb.from("posts").select("*").order("date",{ascending:false,nullsFirst:false}))},
+  async posts(){return ok(await sb.from("posts").select(META).order("date",{ascending:false,nullsFirst:false}))},
+  async full(id){return ok(await sb.from("posts").select("*").eq("id",id).maybeSingle())},
+  async covers(ids){return ok(await sb.from("posts").select("id,cover").in("id",ids))},
   async save(row){return ok(await sb.from("posts").upsert(row).select().single())},
   async setStatus(id,status){return ok(await sb.from("posts").update({status,updated_at:new Date().toISOString()}).eq("id",id).select().single())},
   async remove(id){const d=ok(await sb.from("posts").delete().eq("id",id).select());if(!d||!d.length)throw{message:"permission: không xoá được bài này"};},
@@ -43,7 +47,7 @@ const api={
   async createAccount(email,password){
     const tmp=window.supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_KEY,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false,storageKey:"tta-tao-tk"}});
     const r=await tmp.auth.signUp({email,password});
-    if(r.error)throw r.error;
+    if(r.error){if(/already|registered|exists/i.test(r.error.message||""))return "exists";throw r.error}
     const u=r.data&&r.data.user;
     if(u&&Array.isArray(u.identities)&&u.identities.length===0)return "exists";
     if(!r.data.session)return "confirm";
@@ -53,6 +57,13 @@ const api={
   async signOut(){await sb.auth.signOut()}
 };
 
+function remember(row){if(!row||!row.id)return;S.full[row.id]=row;S.covers[row.id]=row.cover||""}
+function forget(id){delete S.full[id];delete S.covers[id]}
+let coverReq=null;
+async function ensureCovers(ids){
+  const need=ids.filter(id=>S.covers[id]===undefined);if(!need.length)return false;
+  try{const rows=await api.covers(need);need.forEach(id=>S.covers[id]="");rows.forEach(r=>S.covers[r.id]=r.cover||"");return true}catch(x){need.forEach(id=>S.covers[id]="");return true}
+}
 async function loadPosts(){
   const rows=await api.posts();
   S.posts=rows.filter(r=>r.status==="published");
@@ -61,6 +72,9 @@ async function loadPosts(){
 
 /* ---------- Text rendering ---------- */
 function coverHTML(p){
+  const cv=p.cover!==undefined?p.cover:S.covers[p.id];
+  if(cv===undefined) return `<div class="cover loading" aria-hidden="true"></div>`;
+  p={...p,cover:cv};
   if(p.cover) return `<div class="cover" style="background-image:url('${esc(p.cover)}')" role="img" aria-label="${esc(p.title)}"></div>`;
   return `<div class="cover gen-${catOf(p)}">${LOTUS}</div>`;
 }
@@ -87,11 +101,14 @@ function go(view,arg,force){
   if((view==="edit"||view==="members")&&!canWrite()){view="login"}
   if(view==="pw"&&!S.email)view="login";
   if(view==="members"&&!isAdmin())view="kho";
+  if(view==="edit"&&arg&&arg.id&&!S.full[arg.id]){
+    app.innerHTML=`<div class="status">Đang mở bài viết…</div>`;
+    api.full(arg.id).then(r=>{remember(r);go(view,arg,true)}).catch(x=>{app.innerHTML=`<div class="status err">Không mở được bài: ${esc(errText(x))}</div>`});return}
   S.view=view;S.confirm=null;
   if(view==="post"){S.open=arg;setHash("p-"+arg)}
   else if(view==="edit"){setupEditor(arg);setHash(arg&&arg.id?"sua-"+arg.id:"viet")}
   else if(["kho","login","members","pw"].includes(view))setHash({kho:"kho",login:"dang-nhap",members:"thanh-vien",pw:"doi-mat-khau"}[view]);
-  else setHash("");
+  else setHash(S.page>1?"trang-"+S.page:"");
   render();window.scrollTo({top:0});
 }
 function render(){
@@ -132,33 +149,53 @@ function renderTabs(){
   el.innerHTML=Object.keys(CATS).filter(k=>k!=="news"||counts.news).map(k=>`<button class="tab" data-f="${k}" aria-pressed="${act(k)}">${CATS[k]}<span class="n">${S.loaded?counts[k]:""}</span></button>`).join("")+
     `<button class="tab" data-v="kho" aria-pressed="${S.view==="kho"}">Kho bài viết${canWrite()&&S.drafts.length?`<span class="n">· ${S.drafts.length} nháp</span>`:""}</button>`+
     (S.view==="list"?`<input class="search" id="q" type="search" placeholder="Tìm bài viết…" aria-label="Tìm bài viết" value="${esc(S.q)}">`:"");
-  el.querySelectorAll(".tab[data-f]").forEach(b=>b.onclick=()=>{S.filter=b.dataset.f;go("list")});
+  el.querySelectorAll(".tab[data-f]").forEach(b=>b.onclick=()=>{S.filter=b.dataset.f;S.page=1;go("list")});
   el.querySelector('[data-v="kho"]').onclick=()=>go("kho");
-  const q=el.querySelector("#q");if(q)q.oninput=()=>{S.q=q.value;renderList()};
+  const q=el.querySelector("#q");if(q)q.oninput=()=>{S.q=q.value;S.page=1;setHash("");renderList()};
 }
 
 /* ---------- Home ---------- */
 function visible(){
   const q=S.q.trim().toLowerCase();
-  return S.posts.filter(p=>(S.filter==="all"||catOf(p)===S.filter)&&(!q||[p.title,p.excerpt,p.place,p.body].join(" ").toLowerCase().includes(q)));
+  return S.posts.filter(p=>(S.filter==="all"||catOf(p)===S.filter)&&(!q||[p.title,p.excerpt,p.place,p.highlight].join(" ").toLowerCase().includes(q)));
 }
 function renderList(){
   const list=visible();
   if(!S.posts.length){app.innerHTML=`<div class="status">Chưa có bài viết nào được đăng.${canWrite()?`<br><br><button class="btn btn-gold" id="first">+ Viết bài đầu tiên</button>`:""}</div>`;const f=document.getElementById("first");if(f)f.onclick=()=>go("edit",null);return}
   if(!list.length){app.innerHTML=`<div class="status">Không tìm thấy bài viết phù hợp.</div>`;return}
-  const [f,...rest]=list;
-  app.innerHTML=`
-    <article class="feature" data-id="${esc(f.id)}" tabindex="0">
-      ${coverHTML(f)}
-      <div class="txt">${metaLine(f)}<h2>${esc(f.title)}</h2><p class="ex">${esc(f.excerpt)}</p>${f.highlight?`<div class="hl" style="border:0;padding:0">${esc(f.highlight)}</div>`:""}<span class="readmore">Đọc tiếp →</span></div>
-    </article>
-    ${rest.length?`<div class="sec-h"><h3>${S.filter==="all"?"Bài viết gần đây":CATS[S.filter]}</h3><span class="rule"></span></div>
-    <div class="grid">${rest.map(p=>`
+  const pages=Math.max(1,Math.ceil(list.length/PER_PAGE));
+  if(S.page>pages)S.page=pages;if(S.page<1)S.page=1;
+  const slice=list.slice((S.page-1)*PER_PAGE,S.page*PER_PAGE);
+  const withFeature=S.page===1;
+  const [f,...rest]=withFeature?slice:[null,...slice];
+  const card=p=>`
       <article class="card" data-id="${esc(p.id)}" tabindex="0">
         ${coverHTML(p)}
         <div class="txt">${metaLine(p)}<h4>${esc(p.title)}</h4><p class="ex">${esc(p.excerpt)}</p>${p.highlight?`<div class="hl">${esc(p.highlight)}</div>`:""}</div>
-      </article>`).join("")}</div>`:""}`;
+      </article>`;
+  const title=S.q.trim()?`Kết quả tìm kiếm (${list.length})`:S.filter==="all"?"Bài viết gần đây":CATS[S.filter];
+  app.innerHTML=`
+    ${f?`<article class="feature" data-id="${esc(f.id)}" tabindex="0">
+      ${coverHTML(f)}
+      <div class="txt">${metaLine(f)}<h2>${esc(f.title)}</h2><p class="ex">${esc(f.excerpt)}</p>${f.highlight?`<div class="hl" style="border:0;padding:0">${esc(f.highlight)}</div>`:""}<span class="readmore">Đọc tiếp →</span></div>
+    </article>`:""}
+    ${rest.length?`<div class="sec-h"><h3>${title}</h3><span class="rule"></span>${pages>1?`<span class="pg-info">Trang ${S.page}/${pages}</span>`:""}</div>
+    <div class="grid">${rest.map(card).join("")}</div>`:""}
+    ${pagerHTML(S.page,pages,list.length)}`;
   app.querySelectorAll("[data-id]").forEach(el=>{const g=()=>go("post",el.dataset.id);el.onclick=g;el.onkeydown=e=>{if(e.key==="Enter")g()}});
+  app.querySelectorAll("[data-pg]").forEach(b=>b.onclick=()=>{S.page=+b.dataset.pg;go("list")});
+  ensureCovers(slice.map(p=>p.id)).then(changed=>{if(changed&&S.view==="list")renderList()});
+}
+function pagerHTML(page,pages,total){
+  if(pages<=1)return "";
+  const nums=[];const add=n=>nums.push(n);
+  for(let i=1;i<=pages;i++){if(i===1||i===pages||Math.abs(i-page)<=1)add(i);else if(nums[nums.length-1]!=="…")add("…")}
+  return `<nav class="pager" aria-label="Phân trang">
+    <button class="pg" data-pg="${page-1}" ${page===1?"disabled":""} aria-label="Trang trước">← Trước</button>
+    ${nums.map(n=>n==="…"?`<span class="pg-gap">…</span>`:`<button class="pg num" data-pg="${n}" ${n===page?'aria-current="page"':""}>${n}</button>`).join("")}
+    <button class="pg" data-pg="${page+1}" ${page===pages?"disabled":""} aria-label="Trang sau">Sau →</button>
+    <span class="pg-total">${total} bài</span>
+  </nav>`;
 }
 
 /* ---------- Post ---------- */
@@ -173,7 +210,12 @@ function articleHTML(p){
     <div class="prose">${p.excerpt?`<p class="lede">${esc(p.excerpt)}</p>`:""}${prose(p.body)}</div>`;
 }
 function renderPost(){
-  const p=S.posts.find(x=>x.id===S.open);
+  const meta=S.posts.find(x=>x.id===S.open);
+  if(meta&&!S.full[meta.id]){
+    app.innerHTML=`<div class="status">Đang mở bài viết…</div>`;const id=meta.id;
+    api.full(id).then(r=>{if(r)remember(r);else S.full[id]={...meta,body:"",cover:""};if(S.view==="post"&&S.open===id)renderPost()}).catch(x=>{app.innerHTML=`<div class="status">Không mở được bài: ${esc(errText(x))}</div>`});return}
+  const p=meta?{...meta,...S.full[meta.id],...meta}:null;
+  if(p){p.body=S.full[p.id].body;p.cover=S.full[p.id].cover||""}
   if(!p){app.innerHTML=`<div class="status">Bài viết này không còn hoặc chưa được đăng.<br><br><button class="btn btn-ghost" id="bk">← Về trang chủ</button></div>`;document.getElementById("bk").onclick=()=>go("list");return}
   document.title=p.title+" · Thiện Tâm An";
   app.innerHTML=`<article class="article"><button class="back" id="back">← Quay lại</button>${articleHTML(p)}
@@ -200,12 +242,12 @@ function adminRow(p){
 /* ---------- Store ops ---------- */
 async function setStatus(p,status,errEl,done){
   if(S.busy)return;S.busy=true;
-  try{await api.setStatus(p.id,status);await loadPosts();S.busy=false;done?done():render()}
+  try{const r=await api.setStatus(p.id,status);if(r&&S.full[p.id])S.full[p.id]={...S.full[p.id],status};await loadPosts();S.busy=false;done?done():render()}
   catch(x){S.busy=false;if(errEl)errEl.textContent=errText(x)}
 }
 async function removePost(p,errEl,done){
   if(S.busy)return;S.busy=true;
-  try{await api.remove(p.id);await loadPosts();S.confirm=null;S.busy=false;done?done():render()}
+  try{await api.remove(p.id);forget(p.id);await loadPosts();S.confirm=null;S.busy=false;done?done():render()}
   catch(x){S.busy=false;if(errEl)errEl.textContent=/permission/i.test(x.message||"")?"Chỉ tác giả của bài hoặc quản trị mới xoá được bài này.":errText(x)}
 }
 
@@ -362,7 +404,7 @@ function drawMembers(){
 /* ---------- Writer ---------- */
 function setupEditor(arg){
   let data={title:"",cat:S.filter!=="all"?S.filter:"trip",date:today(),place:"",highlight:"",excerpt:"",body:"",cover:""},id=null,status=null,src=null;
-  if(arg&&arg.id){src=[...S.posts,...S.drafts].find(x=>x.id===arg.id);if(src){id=src.id;status=src.status;FIELDS.forEach(k=>data[k]=src[k]??data[k])}}
+  if(arg&&arg.id){const m=[...S.posts,...S.drafts].find(x=>x.id===arg.id);src=m?{...S.full[arg.id],...m,body:(S.full[arg.id]||{}).body||"",cover:(S.full[arg.id]||{}).cover||""}:null;if(src){id=src.id;status=src.status;FIELDS.forEach(k=>data[k]=src[k]??data[k])}}
   if(!id)id=uuid();
   const key="tta:bk:"+(status?id:"new");const bk=LS.get(key);
   const restore=bk&&bk.data&&FIELDS.some(k=>(bk.data[k]||"")!==(data[k]||""))?bk:null;
@@ -477,7 +519,7 @@ async function saveAs(status){
   if(!row.date)row.date=null;
   if(!e.src)row.author_email=S.email;
   try{
-    await api.save(row);
+    const saved=await api.save(row);remember(saved||{...row});
     LS.del(e.key);LS.del("tta:bk:new");S.dirty=false;S.busy=false;
     await loadPosts();
     if(status==="published"){go("post",e.id,true);return}
@@ -503,6 +545,7 @@ async function boot(){
   S.loaded=true;
   let init=["list"];
   if(authHash)init=canWrite()?["kho"]:["login"];
+  else if(/^trang-\d+$/.test(h)){S.page=+h.slice(6);init=["list"]}
   else if(h==="kho")init=["kho"];else if(h==="dang-nhap")init=["login"];else if(h==="thanh-vien")init=["members"];else if(h==="doi-mat-khau")init=["pw"];
   else if(h==="viet")init=["edit",null];else if(h.startsWith("sua-"))init=["edit",{id:h.slice(4)}];else if(h.startsWith("p-"))init=["post",h.slice(2)];
   go(init[0],init[1],true);
